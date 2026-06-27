@@ -1,0 +1,34 @@
+name: Windows C# Build
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    # Uses a Windows virtual machine required for Windows-specific components
+    runs-on: windows-latest
+
+    steps:
+      # Step 1: Check out the repository code
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # Step 2: Add MSBuild to the command line path
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      # Step 3: Set up NuGet to restore dependencies
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v1
+
+      # Step 4: Restore NuGet packages for the solution
+      - name: Restore NuGet Packages
+        run: nuget restore ShellRedirector.slnx
+
+      # Step 5: Build the Visual Studio Solution
+      - name: Build Solution
+        run: msbuild ShellRedirector.slnx /p:Configuration=Release /p:Platform="Any CPU"
+
