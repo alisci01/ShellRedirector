@@ -10,6 +10,36 @@ namespace ShellRedirector
         public List<string> ExplorerMonitors { get; set; } = new List<string>();
     }
 
+    internal static class ProcessExtensions
+    {
+        internal static List<Process> GetChildProcesses(this Process ParentProcess)
+        {
+            var Children = new List<Process>();
+
+            // Query WMI for processes where the Parent is our process ID
+            string Query = $"SELECT ProcessId FROM Win32_Process WHERE ParentProcessId = {ParentProcess.Id}";
+
+            using (var Searcher = new ManagementObjectSearcher(Query))
+            using (var Results = Searcher.Get())
+            {
+                foreach (ManagementObject MO in Results)
+                {
+                    int ChildPid = Convert.ToInt32(MO["ProcessId"]);
+                    try
+                    {
+                        // Convert the PID back into a trackable .NET Process object
+                        Children.Add(Process.GetProcessById(ChildPid));
+                    }
+                    catch (ArgumentException)
+                    {
+                        // The process might have exited between the query and this line
+                    }
+                }
+            }
+            return Children;
+        }
+    }
+
     internal class Program
     {
         static void Main(string[] args)
@@ -98,7 +128,18 @@ namespace ShellRedirector
 
                 using (Process SteamProcess = Process.Start(SteamStartInfo))
                 {
-                    SteamProcess.WaitForExit(); // Blocks here until Notepad is closed
+                    List<Process> ProcessesToWaitForExit = new List<Process>() { SteamProcess };
+
+                    // the original process may have spawned child processes (for example, Steam's update)
+                    //  so we should wait for the child processes to exit too
+                    while (ProcessesToWaitForExit.Count > 0)
+                    {
+                        var CurrentProcessToWait = ProcessesToWaitForExit[0];
+                        CurrentProcessToWait.WaitForExit();
+
+                        ProcessesToWaitForExit.RemoveAt(0);
+                        ProcessesToWaitForExit.AddRange(CurrentProcessToWait.GetChildProcesses());
+                    }
                 }
             }
 
@@ -114,4 +155,3 @@ namespace ShellRedirector
         }
     }
 }
-
