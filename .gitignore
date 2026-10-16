@@ -58,3 +58,8 @@ nunit-*.xml
 
 # Visual Studio artifacts
 .vs/
+*.user
+
+# Build/publish output (the publish profile's PublishDir)
+publish/
+dist/

@@ -3,6 +3,8 @@ name: Windows C# Build
 on:
   push:
     branches: [ "main" ]
+    # Pushing a tag like v1.0.0 also publishes and attaches the zip to a permanent GitHub Release
+    tags: [ "v*" ]
   pull_request:
     branches: [ "main" ]
 
@@ -10,6 +12,15 @@ jobs:
   build:
     # Uses a Windows virtual machine required for Windows-specific components
     runs-on: windows-latest
+
+    # Lets the built-in GITHUB_TOKEN create/update releases
+    permissions:
+      contents: write
+
+    env:
+      # Must match Properties/PublishProfiles/FolderProfile.pubxml (PublishDir and RuntimeIdentifier)
+      PublishDir: publish\
+      ArtifactName: ShellRedirector-win-x64
 
     steps:
       # Step 1: Check out the repository code
@@ -32,3 +43,62 @@ jobs:
       - name: Build Solution
         run: msbuild ShellRedirector.slnx /p:Configuration=Release /p:Platform="Any CPU"
 
+      # Step 6: Publish the single-file executable with the Visual Studio publish profile.
+      # The profile is framework dependent (SelfContained=false), so the exe needs the
+      # .NET 8 Windows Desktop Runtime on the machine that runs it.
+      - name: Publish Executable
+        run: msbuild ShellRedirector.slnx /t:Publish /p:Configuration=Shipping /p:Platform="Any CPU" /p:PublishProfile=FolderProfile
+
+      # Step 7: Zip the published output so it is one downloadable file
+      - name: Package Zip
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "$env:PublishDir")) {
+            Write-Error "Publish directory '$env:PublishDir' was not created by the publish step."
+            exit 1
+          }
+
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Compress-Archive -Path "$env:PublishDir*" -DestinationPath "dist/$env:ArtifactName.zip" -Force
+
+          # Handy for verifying the download later, e.g. on Linux/macOS: sha256sum -c
+          (Get-FileHash "dist/$env:ArtifactName.zip" -Algorithm SHA256).Hash.ToLower() |
+            Out-File -Encoding ascii "dist/$env:ArtifactName.zip.sha256"
+
+          Get-ChildItem dist | Format-Table Name, Length
+
+      # Step 8: Upload the zip so it can be downloaded from the workflow run
+      - name: Upload Zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ArtifactName }}
+          path: |
+            dist/${{ env.ArtifactName }}.zip
+            dist/${{ env.ArtifactName }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      # Step 9: On tag pushes, attach the same zip to a GitHub Release, which is a permanent
+      # download with a stable URL (artifacts from Step 8 expire after retention-days).
+      - name: Publish Release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $Tag = $env:GITHUB_REF_NAME
+          $Files = @("dist/$env:ArtifactName.zip", "dist/$env:ArtifactName.zip.sha256")
+
+          gh release view $Tag --json tagName --quiet *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Output "Release $Tag already exists, replacing its assets."
+            gh release upload $Tag $Files --clobber
+          } else {
+            gh release create $Tag --generate-notes --title $Tag $Files
+          }
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          Write-Output "Download: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/releases/download/$Tag/$env:ArtifactName.zip"
