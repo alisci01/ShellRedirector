@@ -1,15 +1,13 @@
 ﻿using System.Management;
 using System.Windows.Forms;
 using System.Diagnostics;
+using System.Runtime.Versioning;
 
 namespace ShellRedirector
 {
-    internal class Settings
-    {
-        public List<string> SteamMonitors { get; set; } = new List<string>();
-        public List<string> ExplorerMonitors { get; set; } = new List<string>();
-    }
-
+    // The whole program is Windows-only (WMI + WinForms), so declare that up front and let the
+    // compiler stop CA1416 from flagging every Windows-only API we call.
+    [SupportedOSPlatform("windows")]
     internal static class ProcessExtensions
     {
         internal static List<Process> GetChildProcesses(this Process ParentProcess)
@@ -38,109 +36,87 @@ namespace ShellRedirector
             }
             return Children;
         }
+
+        // Waits for the process to exit, then for any processes it spawned (for example, Steam's
+        // updater), and so on down the tree, since a launcher process usually exits right away.
+        internal static void WaitForExitAndChildren(this Process RootProcess)
+        {
+            List<Process> ProcessesToWaitForExit = new List<Process>() { RootProcess };
+
+            while (ProcessesToWaitForExit.Count > 0)
+            {
+                var CurrentProcessToWait = ProcessesToWaitForExit[0];
+                ProcessesToWaitForExit.RemoveAt(0);
+
+                try
+                {
+                    CurrentProcessToWait.WaitForExit();
+                    ProcessesToWaitForExit.AddRange(CurrentProcessToWait.GetChildProcesses());
+                }
+                catch (InvalidOperationException)
+                {
+                    // No process handle to wait on (can happen when UseShellExecute is true and the
+                    // shell didn't hand us one), or the process vanished before we got to it.
+                }
+                finally
+                {
+                    if (CurrentProcessToWait != RootProcess)
+                    {
+                        CurrentProcessToWait.Dispose();
+                    }
+                }
+            }
+        }
     }
 
+    [SupportedOSPlatform("windows")]
     internal class Program
     {
         static void Main(string[] args)
         {
-            //using System.Management;
-
-            // Query the Win32_PnPEntity class for all PnP devices
-            string query = "SELECT * FROM Win32_PnPEntity";
             string ShellRedirectorLocalAppPath = Path.Combine(Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), "ShellRedirector");
             string ShellRedirectorSettignsPath = Path.Combine(ShellRedirectorLocalAppPath, "settings.json");
 
-            Settings RedirectorSettings = new Settings();
-            if (System.IO.Path.Exists(ShellRedirectorSettignsPath))
-            {
-                using (var SettingsFileStream = new FileStream(ShellRedirectorSettignsPath, FileMode.Open))
-                {
-                    var DeserializedSettings = System.Text.Json.JsonSerializer.Deserialize<Settings>(SettingsFileStream);
-                    if (DeserializedSettings != null)
-                    {
-                        RedirectorSettings = DeserializedSettings;
-                    }
-                }
-            }
+            Settings RedirectorSettings = SettingsUpgrader.Load(ShellRedirectorSettignsPath, out bool bUpgradedSettings);
 
-            bool bStartSteam = false;
-            bool bDirtySettings = false;
+            // Query the Win32_PnPEntity class for all PnP devices
+            string query = "SELECT * FROM Win32_PnPEntity";
+            SettingsEntry MatchedEntry = null;
             using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(query))
             {
                 foreach (ManagementObject device in searcher.Get())
                 {
-                    string PNPClass = device["PNPClass"] != null ? device["PNPClass"].ToString() : "";
+                    // Win32_PnPEntity also lists device nodes that aren't currently connected
+                    // (phantom/ghost devices), plus disabled or failed devices, and those still have
+                    // a DeviceID. Only act on devices that are actually there and healthy.
                     string Status = device["Status"] != null ? device["Status"].ToString() : "";
-
-                    if (PNPClass == "Monitor" && Status == "OK")
+                    if (Status != "OK")
                     {
-                        string DeviceID = device["DeviceID"] != null ? device["DeviceID"].ToString() : "";
-                        if (!string.IsNullOrEmpty(DeviceID))
+                        continue;
+                    }
+
+                    string DeviceID = device["DeviceID"] != null ? device["DeviceID"].ToString() : "";
+                    if (!string.IsNullOrEmpty(DeviceID))
+                    {
+                        MatchedEntry = SettingsUpgrader.FindEntryForDevice(RedirectorSettings, DeviceID);
+                        if (MatchedEntry != null)
                         {
-                            bStartSteam = RedirectorSettings.SteamMonitors.Contains(DeviceID);
-                            bool bIgnore = RedirectorSettings.ExplorerMonitors.Contains(DeviceID);
-
-                            if (!bStartSteam && !bIgnore)
-                            {
-                                DialogResult Result = MessageBox.Show($"Unrecognized monitor {DeviceID}. Do you want to mark it as a monitor for Steam Big Picture?", "Unrecognized Monitor", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-                                if (Result == DialogResult.Yes)
-                                {
-                                    RedirectorSettings.SteamMonitors.Add(DeviceID);
-                                    bStartSteam = true;
-                                }
-                                else
-                                {
-                                    RedirectorSettings.ExplorerMonitors.Add(DeviceID);
-                                }
-
-                                bDirtySettings = true;
-                            }
-                            else
-                            {
-                                break;
-                            }
+                            break;
                         }
                     }
                 }
             }
 
-            if (bDirtySettings)
+            // Nothing else in this run changes the settings, so only write the file back out when
+            // it was written by an older version of the program.
+            if (bUpgradedSettings)
             {
-                if (!Path.Exists(ShellRedirectorLocalAppPath))
-                {
-                    System.IO.Directory.CreateDirectory(ShellRedirectorLocalAppPath);
-                }
-
-                using (var SettingsFileStream = new FileStream(ShellRedirectorSettignsPath, FileMode.Create))
-                {
-                    System.Text.Json.JsonSerializer.Serialize<Settings>(SettingsFileStream, RedirectorSettings);
-                }
+                SettingsUpgrader.Save(ShellRedirectorLocalAppPath, ShellRedirectorSettignsPath, RedirectorSettings);
             }
 
-            if (bStartSteam)
+            if (MatchedEntry != null)
             {
-                ProcessStartInfo SteamStartInfo = new ProcessStartInfo
-                {
-                    FileName = "C:\\Program Files (x86)\\Steam\\steam.exe", // The application to run
-                    Arguments = "steam://open/bigpicture", // Optional command-line arguments
-                };
-
-                using (Process SteamProcess = Process.Start(SteamStartInfo))
-                {
-                    List<Process> ProcessesToWaitForExit = new List<Process>() { SteamProcess };
-
-                    // the original process may have spawned child processes (for example, Steam's update)
-                    //  so we should wait for the child processes to exit too
-                    while (ProcessesToWaitForExit.Count > 0)
-                    {
-                        var CurrentProcessToWait = ProcessesToWaitForExit[0];
-                        CurrentProcessToWait.WaitForExit();
-
-                        ProcessesToWaitForExit.RemoveAt(0);
-                        ProcessesToWaitForExit.AddRange(CurrentProcessToWait.GetChildProcesses());
-                    }
-                }
+                RunEntry(MatchedEntry);
             }
 
             ProcessStartInfo ExplorerStartInfo = new ProcessStartInfo
@@ -152,6 +128,36 @@ namespace ShellRedirector
 
             Process.Start(ExplorerStartInfo);
             Environment.Exit(0);
+        }
+
+        // Launches the entry's command, waits for it and all of its child processes to exit,
+        // then returns so the caller can start explorer.
+        static void RunEntry(SettingsEntry Entry)
+        {
+            if (string.IsNullOrWhiteSpace(Entry.Command))
+            {
+                return;
+            }
+
+            ProcessStartInfo EntryStartInfo = new ProcessStartInfo
+            {
+                FileName = Entry.Command, // The application to run
+                Arguments = Entry.Arguments, // Optional command-line arguments
+                UseShellExecute = true,
+                CreateNoWindow = false,
+            };
+
+            try
+            {
+                using (Process EntryProcess = Process.Start(EntryStartInfo))
+                {
+                    EntryProcess.WaitForExitAndChildren();
+                }
+            }
+            catch (Exception e)
+            {
+                MessageBox.Show($"Failed to run {Entry.Command}: {e.Message}", "ShellRedirector", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
     }
 }

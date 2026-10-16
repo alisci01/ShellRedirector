@@ -1,0 +1,13 @@
+{
+  "Version": 1,
+  "Entries": [
+    {
+      "Name": "Steam Big Picture",
+      "DeviceIDs": [
+        "MONITOR\\VID_XXXX&DEV_XXXX\\1&2345ABCD&0&UID123456_0"
+      ],
+      "Command": "C:\\Program Files (x86)\\Steam\\steam.exe",
+      "Arguments": "steam://open/bigpicture"
+    }
+  ]
+}
