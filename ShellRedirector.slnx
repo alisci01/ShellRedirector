@@ -1,3 +1,8 @@
 <Solution>
+  <Configurations>
+    <BuildType Name="Debug" />
+    <BuildType Name="Release" />
+    <BuildType Name="Shipping" />
+  </Configurations>
   <Project Path="ShellRedirector.csproj" />
 </Solution>
